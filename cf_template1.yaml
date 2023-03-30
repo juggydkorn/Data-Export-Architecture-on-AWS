@@ -1,0 +1,310 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: Data Export Architecture for My Messaging Platform
+
+Parameters:
+  S3BucketName:
+    Type: String
+    Description: Name of the S3 bucket to store the exported data
+  AthenaDatabase:
+    Type: String
+    Description: Name of the Athena database where the messaging data is stored
+  AthenaQueryResultBucketName:
+    Type: String
+    Description: Name of the S3 bucket to store the Athena query results
+  AthenaNamedQueryName:
+    Type: String
+    Description: Name of the Athena named query that selects the messaging data
+  StartDate:
+    Type: String
+    Description: Start date of the date range for the export in the format YYYY-MM-DD
+  EndDate:
+    Type: String
+    Description: End date of the date range for the export in the format YYYY-MM-DD
+  SenderEmailAddress:
+    Type: String
+    Description: Email address to use as the sender for notification emails
+  NotificationEmailAddress:
+    Type: String
+    Description: Email address of the user to notify when the export is complete
+  SnsTopicArn:
+    Type: String
+    Description: ARN of the SNS topic to publish notification messages
+  SqsQueueUrl:
+    Type: String
+    Description: URL of the SQS queue to send notification messages
+
+Resources:
+  MyGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: my-glue-job
+      Command:
+        Name: glueetl
+        ScriptLocation: s3://aws-glue-scripts-${AWS::Region}/glue-scripts/export-messaging-data.py
+      DefaultArguments:
+        "--s3-bucket": !Ref S3BucketName
+        "--athena-database": !Ref AthenaDatabase
+        "--athena-query-result-bucket": !Ref AthenaQueryResultBucketName
+        "--athena-named-query": !Ref AthenaNamedQueryName
+        "--start-date": !Ref StartDate
+        "--end-date": !Ref EndDate
+      Role: !GetAtt MyGlueJobRole.Arn
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Timeout: 60
+      WorkerType: G.1X
+      NumberOfWorkers: 5
+
+  MyGlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: my-glue-job-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - glue.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: my-glue-job-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3BucketName}/*"
+                  - !Sub "arn:aws:s3:::${S3BucketName}"
+              - Effect: Allow
+                Action:
+                  - athena:StartQueryExecution
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref SnsTopicArn
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !Ref SqsQueueUrl
+
+  MyLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: my-lambda-function
+      Runtime: nodejs14.x
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          exports.handler = async (event, context) => {
+            const AWS = require('aws-sdk');
+            const moment = require('moment');
+
+            const S3 = new AWS.S3();
+            const Athena = new AWS.Athena();
+            const SNS = new AWS.SNS();
+            const SQS = new AWS.SQS();
+
+            const s3BucketName = process.env.S3_BUCKET_NAME;
+            const athenaDatabase = process.env.ATHENA_DATABASE;
+            const athenaQueryResultBucketName = process.env.ATHENA_QUERY_RESULT_BUCKET_NAME;
+            const athenaNamedQueryName = process.env.ATHENA_NAMED_QUERY_NAME;
+            const startDate = process.env.START_DATE;
+            const endDate = process.env.END_DATE;
+            const snsTopicArn = process.env.SNS_TOPIC_ARN;
+            const sqsQueueUrl = process.env.SQS_QUEUE_URL;
+
+            try {
+                const queryExecutionContext = {
+                    Database: athenaDatabase
+                };
+                const resultConfiguration = {
+                    OutputLocation: `s3://${athenaQueryResultBucketName}/athena-results`
+                };
+                const queryParams = {
+                    QueryString: `SELECT * FROM ${athenaNamedQueryName} WHERE date BETWEEN '${startDate}' AND '${endDate}'`,
+                    QueryExecutionContext: queryExecutionContext,
+                    ResultConfiguration: resultConfiguration
+                };
+                const queryExecutionResult = await Athena.startQueryExecution(queryParams).promise();
+                const queryExecutionId = queryExecutionResult.QueryExecutionId;
+                console.log(`Started Athena query: ${queryExecutionId}`);
+
+                const waitForQuery = async (queryExecutionId) => {
+                    const queryExecutionParams = {
+                        QueryExecutionId: queryExecutionId
+                    };
+                    const queryExecutionResult = await Athena.getQueryExecution(queryExecutionParams).promise();
+                    const queryState = queryExecutionResult.QueryExecution.Status.State;
+                    if (queryState === 'SUCCEEDED') {
+                        const queryResultLocation = queryExecutionResult.QueryExecution.ResultConfiguration.OutputLocation;
+                        console.log(`Athena query succeeded: ${queryExecutionId}, result location: ${queryResultLocation}`);
+
+                        const s3CopyObjectParams = {
+                            Bucket: s3BucketName,
+                            CopySource: queryResultLocation.replace('s3://', ''),
+                            Key: `messaging-data-${startDate}-to-${endDate}.csv`
+                        };
+                        await S3.copyObject(s3CopyObjectParams).promise();
+                        console.log(`Copied query result to S3 bucket: s3://${s3BucketName}/${s3CopyObjectParams.Key}`);
+
+                        const snsPublishParams = {
+                            Message: `Export job completed. Download the file from: s3://${s3BucketName}/${s3CopyObjectParams.Key}`,
+                            Subject: 'Export job completed',
+                            TopicArn: snsTopicArn
+                        };
+                        await SNS.publish(snsPublishParams).promise();
+                        console.log(`Published message to SNS topic: ${snsTopicArn}`);
+
+                        const sqsSendMessageParams = {
+                        QueueUrl: sqsQueueUrl,
+                        MessageBody: `Export job completed for ${startDate} to ${endDate}`
+                    };
+                    await SQS.sendMessage(sqsSendMessageParams).promise();
+                    console.log(`Sent message to SQS queue: ${sqsQueueUrl}`);
+                };
+
+                await waitForQuery(queryExecutionId);
+            } catch (error) {
+                console.error(error);
+                throw error;
+            }
+          };
+      Role: !GetAtt MyLambdaFunctionRole.Arn
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref S3BucketName
+          ATHENA_DATABASE: !Ref AthenaDatabase
+          ATHENA_QUERY_RESULT_BUCKET_NAME: !Ref AthenaQueryResultBucketName
+          ATHENA_NAMED_QUERY_NAME: !Ref AthenaNamedQueryName
+          START_DATE: !Ref StartDate
+          END_DATE: !Ref EndDate
+          SNS_TOPIC_ARN: !Ref SnsTopicArn
+          SQS_QUEUE_URL: !Ref SqsQueueUrl
+
+  MyLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: my-lambda-function-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: my-lambda-function-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:CopyObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3BucketName}/*"
+                  - !Sub "arn:aws:s3:::${S3BucketName}"
+                  - !Sub "arn:aws:s3:::${AthenaQueryResultBucketName}/*"
+                  - !Sub "arn:aws:s3:::${AthenaQueryResultBucketName}"
+              - Effect: Allow
+                Action:
+                  - athena:StartQueryExecution
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref SnsTopicArn
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !Ref SqsQueueUrl
+
+  MyApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: my-api-gateway
+      Description: My Messaging Platform API Gateway
+      EndpointConfiguration:
+        Types:
+          - EDGE
+
+  MyApiGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ParentId: !GetAtt MyApiGateway.RootResourceId
+      PathPart: export
+
+  MyApiGatewayMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ResourceId: !Ref MyApiGatewayResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MyLambdaFunction.Arn}/invocations"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseModels:
+            application/json: "Empty"
+      IntegrationResponses:
+        - StatusCode: "200"
+          ResponseTemplates:
+            application/json: "{}"
+
+  MyApiGatewayMethodPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt MyLambdaFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyApiGateway}/*/POST/export"
+
+Outputs:
+  S3BucketName:
+    Value: !Ref S3BucketName
+    Description: S3 bucket for storing the exported data
+  AthenaNamedQueryName:
+    Value: !Ref AthenaNamedQueryName
+    Description: Athena named query for retrieving messaging data
+  SnsTopicArn:
+    Value: !Ref SnsTopicArn
+    Description: SNS topic for sending notifications to users when the data export job is complete
+  SqsQueueUrl:
+    Value: !Ref SqsQueueUrl
+    Description: SQS queue for sending messages to trigger the Lambda function
+  ApiGatewayEndpoint:
+    Value: !Sub "https://${MyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/export"
+    Description: Endpoint for triggering the data export job via API Gateway
