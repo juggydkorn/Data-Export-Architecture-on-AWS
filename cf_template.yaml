@@ -1,0 +1,558 @@
+##Create an ECS cluster and load balancer
+Resources:
+  MyEcsCluster:
+    Type: AWS::ECS::Cluster
+
+  MyLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: my-load-balancer
+      Subnets:
+        - subnet-123456
+        - subnet-789012
+      SecurityGroups:
+        - sg-123456
+##Create a Lambda function
+  MyLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: my-bucket
+        S3Key: my-lambda-function.zip
+      Handler: index.handler
+      Role: arn:aws:iam::123456789012:role/my-lambda-function-role
+      Runtime: nodejs14.x
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: my-bucket
+      Timeout: 60
+##Create an S3 bucket
+  MyS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: my-bucket
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: MoveToGlacier
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 60
+                StorageClass: GLACIER
+            NoncurrentVersionTransitions:
+              - NoncurrentDays: 365
+                StorageClass: GLACIER
+            NoncurrentVersionExpirationInDays: 365
+##Create a Glue job
+Resources:
+  MyGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: my-glue-job
+      Role: arn:aws:iam::123456789012:role/my-glue-job-role
+      Command:
+        Name: glueetl
+        ScriptLocation: s3://my-bucket/glue-scripts/my-glue-job.py
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+        "--job-language": "python"
+        "--job-name": "my-glue-job"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--enable-continuous-log-filter": "true"
+        "--enable-continuous-log-processing": "true"
+      Connections:
+        - my-glue-connection
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Timeout: 2880
+      AllocatedCapacity: 5
+      GlueVersion: "2.0"
+##Create an API Gateway
+Resources:
+  MyApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: my-api-gateway
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  MyApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      StageName: prod
+
+  MyApiGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ParentId: !GetAtt MyApiGateway.RootResourceId
+      PathPart: my-resource
+
+  MyApiGatewayMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ResourceId: !Ref MyApiGatewayResource
+      HttpMethod: POST
+      AuthorizationType: IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MyLambdaFunction.Arn}/invocations
+      MethodResponses:
+        - StatusCode: "200"
+      RequestParameters:
+        - Required: true
+          Type: querystring
+          Name: start_date
+        - Required: true
+          Type: querystring
+          Name: end_date
+
+  MyApiGatewayPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MyLambdaFunction
+      Action: "lambda:InvokeFunction"
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyApiGateway}/*/POST/my-resource
+##Create a Lambda function for notifications
+Resources:
+  MyNotificationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: my-bucket
+        S3Key: my-notification-function.zip
+      Handler: index.handler
+      Role: arn:aws:iam::123456789012:role/my-notification-function-role
+      Runtime: nodejs14.x
+      Environment:
+        Variables:
+          SENDER_EMAIL: sender@example.com
+          RECIPIENT_EMAIL: recipient@example.com
+          EMAIL_SUBJECT: "Your Data Export is Ready"
+      Timeout: 60
+
+  MyNotificationFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MyNotificationFunction
+      Action: "lambda:InvokeFunction"
+      Principal: events.amazonaws.com
+      SourceArn: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/my-scheduled-rule
+##Configure QuickSight
+Resources:
+  MyAthenaDataSet:
+    Type: AWS::QuickSight::DataSet
+    Properties:
+      Name: my-athena-dataset
+      PhysicalTableMap:
+        - TableName: my-messaging-data
+          TableSchema: my-messaging-schema
+          DataSetSchema:
+            Columns:
+              - Name: column1
+                Type: String
+              - Name: column2
+                Type: Integer
+              - Name: column3
+                Type: Date
+              - Name: column4
+                Type: Decimal
+
+  MyQuickSightAnalysis:
+    Type: AWS::QuickSight::Analysis
+    Properties:
+      Name: my-quicksight-analysis
+      AnalysisSource:
+        DataSetArn: !Ref MyAthenaDataSet
+      Permissions:
+        - Principal: arn:aws:quicksight:us-east-1:123456789012:user/my-quicksight-user
+          Actions:
+            - "quicksight:DescribeAnalysis"
+            - "quicksight:DescribeDataSource"
+            - "quicksight:DescribeDataSet"
+            - "quicksight:ExecuteQuery"
+            - "quicksight:GenerateEmbedUrl"
+            - "quicksight:GetDashboardEmbedUrl"
+            - "quicksight:GetSessionEmbedUrl"
+            - "quicksight:PassDataSet"
+            - "quicksight:Subscribe"
+            - "quicksight:Unsubscribe"
+            - "quicksight:UpdateDataSetPermissions"
+            - "quicksight:UpdateDataSourcePermissions"
+##Create a CloudWatch event
+Resources:
+  MyScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: my-scheduled-rule
+      Description: Schedule rule to trigger Lambda function
+      ScheduleExpression: "rate(1 day)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MyNotificationFunction.Arn
+          Id: "MyTarget"
+
+  MyScheduledRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MyNotificationFunction
+      Action: "lambda:InvokeFunction"
+      Principal: events.amazonaws.com
+      SourceArn: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/my-scheduled-rule
+##Define IAM policies
+Resources:
+  MyLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: my-lambda-function-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - "s3:PutObject"
+                Resource: arn:aws:s3:::my-bucket/*
+              - Effect: Allow
+                Action:
+                  - "glue:StartJobRun"
+                Resource: arn:aws:glue:*:*:job/my-glue-job
+              - Effect: Allow
+                Action:
+                  - "athena:StartQueryExecution"
+                  - "athena:GetQueryExecution"
+                  - "athena:GetQueryResults"
+                Resource: arn:aws:athena:*:*:*
+              - Effect: Allow
+                Action:
+                  - "quicksight:CreateDataSource"
+                  - "quicksight:CreateDataSet"
+                  - "quicksight:UpdateDataSet"
+                  - "quicksight:DeleteDataSet"
+                  - "quicksight:CreateAnalysis"
+                  - "quicksight:UpdateAnalysis"
+                  - "quicksight:DeleteAnalysis"
+                Resource: arn:aws:quicksight:us-east-1:123456789012:*
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  MyApiGatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: my-api-gateway-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "execute-api:Invoke"
+                Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyApiGateway}/*/POST/my-resource"
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: arn:aws:logs:*:*:*
+##Define the CloudFormation stack
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Export messaging data to S3, Athena, and QuickSight
+Resources:
+  MyS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: my-bucket
+
+  MyAthenaQueryResultBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: my-athena-query-result-bucket
+
+  MyGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: my-glue-job
+      Description: Job to export messaging data
+      Role: !GetAtt MyGlueJobRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: s3://my-bucket/glue_scripts/my-glue-job-script.py
+      DefaultArguments:
+        "--s3_bucket": !Ref MyS3Bucket
+        "--s3_prefix": my-exported-data/
+        "--query_result_bucket": !Ref MyAthenaQueryResultBucket
+        "--database_name": my_messaging_database
+        "--table_name": my_messaging_table
+        "--start_date": "2022-01-01"
+        "--end_date": "2022-03-31"
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      GlueVersion: "2.0"
+
+  MyGlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: my-glue-job-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:PutObject"
+                  - "s3:ListBucket"
+                  - "glue:GetTable"
+                  - "glue:GetTables"
+                  - "glue:GetDatabases"
+                  - "glue:GetDatabase"
+                  - "glue:GetConnections"
+                  - "glue:CreateConnection"
+                  - "glue:UpdateConnection"
+                  - "glue:DeleteConnection"
+                  - "glue:StartJobRun"
+                  - "glue:GetJobRun"
+                  - "glue:GetJobRuns"
+                  - "glue:BatchStopJobRun"
+                  - "athena:StartQueryExecution"
+                  - "athena:GetQueryExecution"
+                  - "athena:GetQueryResults"
+                Resource: "*"
+
+  MyAthenaNamedQuery:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: my-athena-query-named-query
+      Description: Named query to export messaging data
+      QueryString: !Sub |
+        SELECT *
+        FROM my_messaging_table
+        WHERE date_column BETWEEN CAST('${startDate}' AS TIMESTAMP) AND CAST('${endDate}' AS TIMESTAMP)
+      Database: my_messaging_database
+      WorkGroup: primary
+
+  MyNotificationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: my-notification-function
+      Description: Function to send notification email
+      Handler: index.handler
+      Role: !GetAtt MyLambdaFunctionRole.Arn
+      Code:
+        S3Bucket: my-notification-function-bucket
+        S3Key: my-notification-function-package.zip
+      Runtime: nodejs14.x
+      Timeout: 60
+      Environment:
+        Variables:
+          SENDER_EMAIL_ADDRESS: sender@example.com
+          RECIPIENT_EMAIL_ADDRESS: recipient@example.com
+          AWS_REGION: !Ref AWS::Region
+
+  MyApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: my-api-gateway
+      Description: API Gateway for data export
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  MyApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      StageName: prod
+      Description: Production deployment
+
+  MyApiGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ParentId: !GetAtt MyApiGateway.RootResourceId
+      PathPart: my-resource
+
+  MyApiGatewayMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ResourceId: !Ref MyApiGatewayResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:glue:action/StartJobRun"
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseTemplates:
+              application/json: !Ref "AWS::NoValue"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseModels:
+            application/json: !Ref "AWS::NoValue"
+
+  MyScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: my-scheduled-rule
+      Description: Schedule rule to trigger Lambda function
+      ScheduleExpression: "rate(1 day)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MyNotificationFunction.Arn
+          Id: "MyTarget"
+
+  MyScheduledRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MyNotificationFunction
+      Action: "lambda:InvokeFunction"
+      Principal: events.amazonaws.com
+      SourceArn: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/my-scheduled-rule
+
+  MyLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: my-lambda-function-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ses:SendEmail"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "sqs:SendMessage"
+                Resource: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:my-sqs-queue"
+
+  MySqsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: my-sqs-queue
+
+  MySnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: my-sns-topic
+      TopicName: my-sns-topic
+
+  MySnsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref MySnsTopic
+      Endpoint: recipient@example.com
+
+  MySnsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref MySnsTopic
+          - Effect: Allow
+            Principal:
+              Service: sqs.amazonaws.com
+            Action:
+              - "sqs:SendMessage"
+              - "sqs:ReceiveMessage"
+              - "sqs:DeleteMessage"
+            Resource: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:my-sqs-queue"
+      Topics:
+        - !Ref MySnsTopic
+
+  MyLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: my-lambda-function
+      Description: Lambda function to export messaging data
+      Handler: index.handler
+      Role: !GetAtt MyLambdaFunctionRole.Arn
+      Code:
+        S3Bucket: my-lambda-function-bucket
+        S3Key: my-lambda-function-package.zip
+      Runtime: nodejs14.x
+      Timeout: 900
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref MyS3Bucket
+          ATHENA_DATABASE: my_messaging_database
+          ATHENA_QUERY_RESULT_BUCKET_NAME: !Ref MyAthenaQueryResultBucket
+          ATHENA_NAMED_QUERY_NAME: my-athena-query-named-query
+          START_DATE: "2022-01-01"
+          END_DATE: "2022-03-31"
+          SNS_TOPIC_ARN: !Ref MySnsTopic
+          SQS_QUEUE_URL: !GetAtt MySqsQueue.QueueUrl
+
+  MyLambdaFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MyLambdaFunction
+      Action: "lambda:InvokeFunction"
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyApiGateway}/*/POST/my-resource"
+
+  MyApiGatewayMethodPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MyLambdaFunction
+      Action: "lambda:InvokeFunction"
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyApiGateway}/*/POST/my-resource"
+     
