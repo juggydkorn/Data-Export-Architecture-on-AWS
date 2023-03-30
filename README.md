@@ -77,3 +77,8 @@ Finally, you are required to do a cost analysis of your proposed solution (calcu
 2. You can add changes to the current infrastructure, or you can assume your own infrastructure that receives billions of messages.
 3. You are allowed to use any AWS service.
 4. You are required to include all of the services in your *Cost Analysis*.
+
+
+Proposed Architecture of "cf_template1"
+![image](https://user-images.githubusercontent.com/7500774/228920473-1e9aff18-8b44-4627-8388-63e8fa514fdb.png)
+
